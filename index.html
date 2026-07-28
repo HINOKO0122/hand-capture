@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Palm Up Fire AR - Local AI</title>
+  <title>Hand AR - Magic & Effect Modes</title>
   
-  <!-- MediaPipe / TensorFlow.js 関連ライブラリ (CDN) -->
+  <!-- MediaPipe / TensorFlow.js 関連ライブラリ -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands"></script>
@@ -28,7 +28,6 @@
       height: 100vh;
     }
 
-    /* カメラ映像とARキャンバスを全画面表示（左右反転） */
     video, canvas {
       position: absolute;
       top: 0;
@@ -50,32 +49,58 @@
       left: 20px;
       z-index: 10;
       background: rgba(0, 0, 0, 0.75);
-      padding: 12px 20px;
+      padding: 14px 20px;
       border-radius: 12px;
       backdrop-filter: blur(8px);
       color: white;
       display: flex;
-      align-items: center;
+      flex-direction: column;
       gap: 12px;
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
     }
 
-    #status {
-      font-size: 14px;
+    .ui-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
     }
 
-    /* 炎のアクティブインジケーター */
-    #fire-indicator {
+    select, button {
+      padding: 6px 12px;
+      font-size: 14px;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      background: rgba(255, 255, 255, 0.1);
+      color: white;
+      cursor: pointer;
+      outline: none;
+    }
+
+    select:hover, button:hover {
+      background: rgba(255, 255, 255, 0.25);
+    }
+
+    select option {
+      background: #222;
+      color: white;
+    }
+
+    #status {
+      font-size: 13px;
+      color: #ccc;
+    }
+
+    #indicator {
       display: inline-block;
-      width: 12px;
-      height: 12px;
+      width: 10px;
+      height: 10px;
       border-radius: 50%;
       background-color: #444;
       transition: background-color 0.3s, box-shadow 0.3s;
     }
-    #fire-indicator.active {
-      background-color: #ff5722;
-      box-shadow: 0 0 15px #ff5722;
+    #indicator.active {
+      background-color: #00ffcc;
+      box-shadow: 0 0 12px #00ffcc;
     }
   </style>
 </head>
@@ -83,31 +108,73 @@
 
   <div id="container">
     <video id="webcam" autoplay playsinline></video>
+    <!-- オフスクリーン用：カメラ映像を左右反転せずに一時保持・加工するキャンバス -->
     <canvas id="arCanvas"></canvas>
   </div>
 
   <div id="ui">
-    <span id="fire-indicator"></span>
-    <span id="status">AIモデルを読み込んでいます...</span>
+    <div class="ui-row">
+      <label for="modeSelect">モード:</label>
+      <select id="modeSelect">
+        <option value="magic">魔法モード（炎）</option>
+        <option value="effect">エフェクトモード（枠内加工）</option>
+      </select>
+    </div>
+
+    <div class="ui-row" id="effectSelectRow" style="display: none;">
+      <label for="effectType">エフェクト:</label>
+      <select id="effectType">
+        <option value="mono">モノクロ (白黒)</option>
+        <option value="invert">ネガ (階調反転)</option>
+        <option value="glitch">グリッチ (ノイズ/ズレ)</option>
+        <option value="sepia">セピア</option>
+        <option value="pixelate">モザイク</option>
+      </select>
+    </div>
+
+    <div class="ui-row">
+      <span id="indicator"></span>
+      <span id="status">AIモデルを読み込んでいます...</span>
+    </div>
   </div>
 
   <script>
     const video = document.getElementById('webcam');
     const canvas = document.getElementById('arCanvas');
     const ctx = canvas.getContext('2d');
+    const modeSelect = document.getElementById('modeSelect');
+    const effectTypeSelect = document.getElementById('effectType');
+    const effectSelectRow = document.getElementById('effectSelectRow');
     const statusText = document.getElementById('status');
-    const fireIndicator = document.getElementById('fire-indicator');
+    const indicator = document.getElementById('indicator');
 
     let detector = null;
+    let flameFrame = 0;
+
+    // 非表示の描画用ワークキャンバス（エフェクト加工用）
+    const workCanvas = document.createElement('canvas');
+    const workCtx = workCanvas.getContext('2d');
 
     function resizeCanvas() {
       canvas.width = window.innerWidth;
       canvas.height = window.innerHeight;
+      workCanvas.width = window.innerWidth;
+      workCanvas.height = window.innerHeight;
     }
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
 
-    // 1. カメラ設定
+    // UI切替イベント
+    modeSelect.addEventListener('change', (e) => {
+      if (e.target.value === 'effect') {
+        effectSelectRow.style.display = 'flex';
+        statusText.textContent = '両手の親指と人差し指で枠を作ってください';
+      } else {
+        effectSelectRow.style.display = 'none';
+        statusText.textContent = '手のひらを水平（上向き）に構えてください';
+      }
+    });
+
     async function setupCamera() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -124,7 +191,6 @@
       }
     }
 
-    // 2. Hand Detector 初期化
     async function setupDetector() {
       const model = handPoseDetection.SupportedModels.MediaPipeHands;
       const detectorConfig = {
@@ -133,135 +199,208 @@
         modelType: 'full'
       };
       detector = await handPoseDetection.createDetector(model, detectorConfig);
-      statusText.textContent = '準備完了：手のひらを上（天）に向けてかざしてください';
+      statusText.textContent = '準備完了：手のひらを上に向け（魔法）または両手で枠（エフェクト）';
     }
 
-    // 「手のひらが上（水平）を向いているか」判定するロジック
+    // --- 魔法モード用ロジック ---
     function isPalmFacingUp(keypoints, handedness) {
       const getPt = (name) => keypoints.find(k => k.name === name);
-      
       const wrist = getPt('wrist');
       const indexMcp = getPt('index_finger_mcp');
       const pinkyMcp = getPt('pinky_finger_mcp');
       const middleTip = getPt('middle_finger_tip');
-      const thumbTip = getPt('thumb_tip');
 
-      // 条件1: 指先が手首よりも奥（Z軸がプラス）にあるか
-      // 手のひらを上に受けると、指先はカメラから見て奥へ倒れる傾向になります
-      const isFingersPointingAway = (middleTip.z - wrist.z) < -0.02; // 奥側へ傾いているか
-
-      // 条件2: 手のひらの「左右の開き（法線）」から表裏を推定
+      const isFingersPointingAway = (middleTip.z - wrist.z) < -0.02;
       const isRightHand = handedness === 'Right';
-      
-      // X・Yのベクトル計算
       const v1 = { x: indexMcp.x - wrist.x, y: indexMcp.y - wrist.y };
       const v2 = { x: pinkyMcp.x - wrist.x, y: pinkyMcp.y - wrist.y };
       const crossZ = v1.x * v2.y - v1.y * v2.x;
 
-      // 鏡像画面かつ手のひら上向き姿勢の時、外積Zと親指のY位置で手の平の上向きを特定
       const isPalmOrientation = isRightHand ? crossZ < 0 : crossZ > 0;
-
-      // 条件3: 手首が下、指が上方向に向いているおおまかなアライメント
       const isUpwardGesture = middleTip.y < wrist.y;
 
       return isPalmOrientation && isUpwardGesture && isFingersPointingAway;
     }
 
-    // 炎のアニメーションを描画する関数
-    let flameFrame = 0;
     function drawFire(x, y, size) {
       flameFrame++;
-      
       ctx.save();
       ctx.translate(x, y);
 
-      // 炎のグラデーション
       const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, size);
-      gradient.addColorStop(0, 'rgba(255, 255, 220, 1)'); // 芯（高輝度）
-      gradient.addColorStop(0.25, 'rgba(255, 180, 20, 0.9)'); // オレンジ
-      gradient.addColorStop(0.65, 'rgba(255, 50, 0, 0.6)'); // 外縁（赤）
-      gradient.addColorStop(1, 'rgba(200, 0, 0, 0)'); // 透過
+      gradient.addColorStop(0, 'rgba(255, 255, 220, 1)');
+      gradient.addColorStop(0.25, 'rgba(255, 180, 20, 0.9)');
+      gradient.addColorStop(0.65, 'rgba(255, 50, 0, 0.6)');
+      gradient.addColorStop(1, 'rgba(200, 0, 0, 0)');
 
       ctx.fillStyle = gradient;
-      
-      // 揺らぐ炎の輪郭を描画
       ctx.beginPath();
       for (let i = 0; i < 360; i += 10) {
         const angle = i * Math.PI / 180;
         const wobble = Math.sin(flameFrame * 0.25 + i * 0.1) * (size * 0.12) + Math.random() * (size * 0.06);
         const r = size + wobble;
         const noiseY = Math.sin(angle) > 0 ? 0.4 : 1.1; 
-        
         ctx.lineTo(r * Math.cos(angle), r * Math.sin(angle) * noiseY * 1.6 - (size * 0.3));
       }
       ctx.closePath();
       ctx.fill();
 
-      // 発光（Glow）エフェクト
       ctx.shadowBlur = size * 0.6;
       ctx.shadowColor = '#ff4500';
       ctx.fill();
-
       ctx.restore();
     }
 
-    // 3. メインループ
+    // --- エフェクトモード用ロジック ---
+    // 4つの頂点を反時計回り/時計回りにソートして正しい四角形を作る
+    function sortQuadPoints(pts) {
+      const center = pts.reduce((acc, p) => ({ x: acc.x + p.x / 4, y: acc.y + p.y / 4 }), { x: 0, y: 0 });
+      return pts.sort((a, b) => {
+        const a1 = Math.atan2(a.y - center.y, a.x - center.x);
+        const a2 = Math.atan2(b.y - center.y, b.x - center.x);
+        return a1 - a2;
+      });
+    }
+
+    // 選択されたエフェクトをワークキャンバスに適用する処理
+    function applyEffectToQuad(pts, effectType, scaleX, scaleY) {
+      const sortedPts = sortQuadPoints(pts.map(p => ({ x: p.x * scaleX, y: p.y * scaleY })));
+
+      // 1. ワークキャンバスをクリアして最新の背景カメラ映像を描画
+      workCtx.save();
+      workCtx.clearRect(0, 0, workCanvas.width, workCanvas.height);
+
+      // 2. 4点からなる多角形（クリッピングパス）を設定
+      workCtx.beginPath();
+      workCtx.moveTo(sortedPts[0].x, sortedPts[0].y);
+      for (let i = 1; i < sortedPts.length; i++) {
+        workCtx.lineTo(sortedPts[i].x, sortedPts[i].y);
+      }
+      ctx.closePath();
+      workCtx.clip();
+
+      // 3. クリッピング領域内に加工した映像を描画
+      if (effectType === 'glitch') {
+        // グリッチ：RGBの色ズレ＋ジッター
+        workCtx.drawImage(video, 0, 0, workCanvas.width, workCanvas.height);
+        const jitterX = (Math.random() - 0.5) * 20;
+        const jitterY = (Math.random() - 0.5) * 10;
+        workCtx.globalCompositeOperation = 'screen';
+        workCtx.drawImage(video, jitterX, jitterY, workCanvas.width, workCanvas.height);
+        workCtx.globalCompositeOperation = 'source-over';
+      } else if (effectType === 'pixelate') {
+        // モザイク：縮小して再拡大
+        const smallW = Math.max(1, Math.floor(workCanvas.width / 20));
+        const smallH = Math.max(1, Math.floor(workCanvas.height / 20));
+        workCtx.imageSmoothingEnabled = false;
+        workCtx.drawImage(video, 0, 0, smallW, smallH);
+        workCtx.drawImage(workCanvas, 0, 0, smallW, smallH, 0, 0, workCanvas.width, workCanvas.height);
+        workCtx.imageSmoothingEnabled = true;
+      } else {
+        // CSS Filter系 (mono, invert, sepia)
+        let filterStr = 'none';
+        if (effectType === 'mono') filterStr = 'grayscale(100%) contrast(120%)';
+        if (effectType === 'invert') filterStr = 'invert(100%)';
+        if (effectType === 'sepia') filterStr = 'sepia(100%) hue-rotate(-30deg)';
+
+        workCtx.filter = filterStr;
+        workCtx.drawImage(video, 0, 0, workCanvas.width, workCanvas.height);
+        workCtx.filter = 'none';
+      }
+
+      workCtx.restore();
+
+      // 4. メインキャンバスに合成
+      ctx.drawImage(workCanvas, 0, 0);
+
+      // 5. 枠線を描画（スタイリッシュなネオン枠）
+      ctx.strokeStyle = '#00ffcc';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(sortedPts[0].x, sortedPts[0].y);
+      for (let i = 1; i < sortedPts.length; i++) {
+        ctx.lineTo(sortedPts[i].x, sortedPts[i].y);
+      }
+      ctx.closePath();
+      ctx.stroke();
+
+      // 4つの頂点に小さなポインターを描画
+      ctx.fillStyle = '#ffffff';
+      sortedPts.forEach(p => {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+
+    // --- メイン描画ループ ---
     async function renderLoop() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       if (detector && video.readyState >= 2) {
         const hands = await detector.estimateHands(video);
+        const currentMode = modeSelect.value;
+        const scaleX = canvas.width / video.videoWidth;
+        const scaleY = canvas.height / video.videoHeight;
 
-        if (hands.length > 0) {
+        if (currentMode === 'magic') {
+          // ==================== 魔法モード ====================
           let fireDetected = false;
 
-          const scaleX = canvas.width / video.videoWidth;
-          const scaleY = canvas.height / video.videoHeight;
+          if (hands.length > 0) {
+            for (const hand of hands) {
+              if (isPalmFacingUp(hand.keypoints, hand.handedness)) {
+                fireDetected = true;
+                const wrist = hand.keypoints.find(k => k.name === 'wrist');
+                const indexMcp = hand.keypoints.find(k => k.name === 'index_finger_mcp');
+                const pinkyMcp = hand.keypoints.find(k => k.name === 'pinky_finger_mcp');
 
-          for (const hand of hands) {
-            const keypoints = hand.keypoints;
-            const handedness = hand.handedness;
+                const palmCenterX = (wrist.x + indexMcp.x + pinkyMcp.x) / 3;
+                const palmCenterY = (wrist.y + indexMcp.y + pinkyMcp.y) / 3;
 
-            // 「手のひらが上を向いているか」チェック
-            if (isPalmFacingUp(keypoints, handedness)) {
-              fireDetected = true;
-              
-              const wrist = keypoints.find(k => k.name === 'wrist');
-              const indexMcp = keypoints.find(k => k.name === 'index_finger_mcp');
-              const pinkyMcp = keypoints.find(k => k.name === 'pinky_finger_mcp');
-              
-              // 手のひらの中心座標
-              const palmCenterX = (wrist.x + indexMcp.x + pinkyMcp.x) / 3;
-              const palmCenterY = (wrist.y + indexMcp.y + pinkyMcp.y) / 3;
+                const handSize = Math.hypot(wrist.x - indexMcp.x, wrist.y - indexMcp.y);
+                const fireSize = handSize * 0.85;
+                const floatOffsetY = handSize * 0.4;
 
-              // 手のサイズ計算
-              const handSize = Math.hypot(wrist.x - indexMcp.x, wrist.y - indexMcp.y);
-              const fireSize = handSize * 0.85;
-
-              // 手のひらの真上（画面のマイナスY方向）へ少し浮かせる
-              const floatOffsetY = handSize * 0.4;
-
-              const finalX = palmCenterX * scaleX;
-              const finalY = (palmCenterY - floatOffsetY) * scaleY;
-
-              drawFire(finalX, finalY, fireSize);
+                drawFire(palmCenterX * scaleX, (palmCenterY - floatOffsetY) * scaleY, fireSize);
+              }
             }
           }
 
           if (fireDetected) {
-            fireIndicator.classList.add('active');
-            statusText.textContent = '手のひらの上に炎が召喚されました！';
+            indicator.classList.add('active');
+            statusText.textContent = '炎が召喚されています！';
           } else {
-            fireIndicator.classList.remove('active');
+            indicator.classList.remove('active');
             statusText.textContent = '手のひらを水平（上向き）に構えてください';
           }
 
-        } else {
-          statusText.textContent = '手を認識していません';
-          fireIndicator.classList.remove('active');
+        } else if (currentMode === 'effect') {
+          // ==================== エフェクトモード ====================
+          // 両手が検出されているかチェック
+          if (hands.length >= 2) {
+            const quadPoints = [];
+
+            // 両手から親指先端(4)と人差し指先端(8)を取得（計4点）
+            hands.slice(0, 2).forEach(hand => {
+              const thumbTip = hand.keypoints.find(k => k.name === 'thumb_tip');
+              const indexTip = hand.keypoints.find(k => k.name === 'index_finger_tip');
+              if (thumbTip) quadPoints.push({ x: thumbTip.x, y: thumbTip.y });
+              if (indexTip) quadPoints.push({ x: indexTip.x, y: indexTip.y });
+            });
+
+            if (quadPoints.length === 4) {
+              indicator.classList.add('active');
+              statusText.textContent = `エフェクト適用中: ${effectTypeSelect.options[effectTypeSelect.selectedIndex].text}`;
+              applyEffectToQuad(quadPoints, effectTypeSelect.value, scaleX, scaleY);
+            }
+          } else {
+            indicator.classList.remove('active');
+            statusText.textContent = '両手を画面内に入れて枠（フレーム）を作ってください';
+          }
         }
       }
-      
+
       requestAnimationFrame(renderLoop);
     }
 
