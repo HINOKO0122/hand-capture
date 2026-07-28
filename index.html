@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Back of Hand Fire AR (Fixed)</title>
+  <title>Palm Up Fire AR - Local AI</title>
   
   <!-- MediaPipe / TensorFlow.js 関連ライブラリ (CDN) -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
@@ -28,7 +28,7 @@
       height: 100vh;
     }
 
-    /* カメラ映像とARキャンバスを全画面に広げて左右反転 */
+    /* カメラ映像とARキャンバスを全画面表示（左右反転） */
     video, canvas {
       position: absolute;
       top: 0;
@@ -36,21 +36,20 @@
       width: 100vw;
       height: 100vh;
       object-fit: cover;
-      transform: scaleX(-1); /* 鏡のように反転 */
+      transform: scaleX(-1);
     }
 
-    /* キャンバスは透過 */
     #arCanvas {
       pointer-events: none;
     }
 
-    /* UIレイアウト（画面上部に浮遊表示） */
+    /* UIレイアウト */
     #ui {
       position: absolute;
       top: 20px;
       left: 20px;
       z-index: 10;
-      background: rgba(0, 0, 0, 0.7);
+      background: rgba(0, 0, 0, 0.75);
       padding: 12px 20px;
       border-radius: 12px;
       backdrop-filter: blur(8px);
@@ -65,7 +64,7 @@
       font-size: 14px;
     }
 
-    /* 炎がアクティブな時のインジケーター */
+    /* 炎のアクティブインジケーター */
     #fire-indicator {
       display: inline-block;
       width: 12px;
@@ -101,7 +100,6 @@
 
     let detector = null;
 
-    // 画面サイズのリサイズ処理
     function resizeCanvas() {
       canvas.width = window.innerWidth;
       canvas.height = window.innerHeight;
@@ -132,38 +130,41 @@
       const detectorConfig = {
         runtime: 'mediapipe',
         solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/hands',
-        modelType: 'full' // 精度重視
+        modelType: 'full'
       };
       detector = await handPoseDetection.createDetector(model, detectorConfig);
-      statusText.textContent = '準備完了：手の甲をカメラに向けてください';
+      statusText.textContent = '準備完了：手のひらを上（天）に向けてかざしてください';
     }
 
-    // 手の甲がカメラ（自分）側を向いているか判定する関数
-    // 【修正点1】判定ロジックを逆にしました
-    function isBackOfHandFacingCamera(keypoints, handedness) {
+    // 「手のひらが上（水平）を向いているか」判定するロジック
+    function isPalmFacingUp(keypoints, handedness) {
       const getPt = (name) => keypoints.find(k => k.name === name);
+      
       const wrist = getPt('wrist');
+      const indexMcp = getPt('index_finger_mcp');
+      const pinkyMcp = getPt('pinky_finger_mcp');
+      const middleTip = getPt('middle_finger_tip');
       const thumbTip = getPt('thumb_tip');
-      const indexTip = getPt('index_finger_tip');
 
-      // 左右の手情報(handedness)情報
-      // 鏡像（左右反転）であることを考慮
+      // 条件1: 指先が手首よりも奥（Z軸がプラス）にあるか
+      // 手のひらを上に受けると、指先はカメラから見て奥へ倒れる傾向になります
+      const isFingersPointingAway = (middleTip.z - wrist.z) < -0.02; // 奥側へ傾いているか
+
+      // 条件2: 手のひらの「左右の開き（法線）」から表裏を推定
       const isRightHand = handedness === 'Right';
       
-      // 手首から指先へのベクトル
-      const wristToIndex = { x: indexTip.x - wrist.x, y: indexTip.y - wrist.y };
-      // 手首から親指へのベクトル
-      const wristToThumb = { x: thumbTip.x - wrist.x, y: thumbTip.y - wrist.y };
+      // X・Yのベクトル計算
+      const v1 = { x: indexMcp.x - wrist.x, y: indexMcp.y - wrist.y };
+      const v2 = { x: pinkyMcp.x - wrist.x, y: pinkyMcp.y - wrist.y };
+      const crossZ = v1.x * v2.y - v1.y * v2.x;
 
-      // 外積（Cross Product）のZ成分
-      const crossProductZ = wristToIndex.x * wristToThumb.y - wristToIndex.y * wristToThumb.x;
+      // 鏡像画面かつ手のひら上向き姿勢の時、外積Zと親指のY位置で手の平の上向きを特定
+      const isPalmOrientation = isRightHand ? crossZ < 0 : crossZ > 0;
 
-      // 前回の判定を反転
-      if (isRightHand) {
-        return crossProductZ < -100; // 右手の甲が前
-      } else {
-        return crossProductZ > 100; // 左手の甲が前
-      }
+      // 条件3: 手首が下、指が上方向に向いているおおまかなアライメント
+      const isUpwardGesture = middleTip.y < wrist.y;
+
+      return isPalmOrientation && isUpwardGesture && isFingersPointingAway;
     }
 
     // 炎のアニメーションを描画する関数
@@ -172,103 +173,87 @@
       flameFrame++;
       
       ctx.save();
-      ctx.translate(x, y); // 指定位置へ移動
+      ctx.translate(x, y);
 
       // 炎のグラデーション
       const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, size);
-      gradient.addColorStop(0, 'rgba(255, 255, 200, 1)'); // 芯
-      gradient.addColorStop(0.3, 'rgba(255, 200, 50, 0.9)'); // 炎
-      gradient.addColorStop(0.7, 'rgba(255, 80, 0, 0.6)'); // 炎の外側
-      gradient.addColorStop(1, 'rgba(255, 0, 0, 0)'); // 透過
+      gradient.addColorStop(0, 'rgba(255, 255, 220, 1)'); // 芯（高輝度）
+      gradient.addColorStop(0.25, 'rgba(255, 180, 20, 0.9)'); // オレンジ
+      gradient.addColorStop(0.65, 'rgba(255, 50, 0, 0.6)'); // 外縁（赤）
+      gradient.addColorStop(1, 'rgba(200, 0, 0, 0)'); // 透過
 
       ctx.fillStyle = gradient;
       
-      // 揺らぐ炎の形状
+      // 揺らぐ炎の輪郭を描画
       ctx.beginPath();
       for (let i = 0; i < 360; i += 10) {
         const angle = i * Math.PI / 180;
-        const wobble = Math.sin(flameFrame * 0.2 + i * 0.1) * (size * 0.1) + Math.random() * (size * 0.05);
+        const wobble = Math.sin(flameFrame * 0.25 + i * 0.1) * (size * 0.12) + Math.random() * (size * 0.06);
         const r = size + wobble;
-        // 炎の上部を尖らせ、少し縦長にする
-        const noiseY = Math.sin(angle) > 0 ? 0.5 : 1.0; 
+        const noiseY = Math.sin(angle) > 0 ? 0.4 : 1.1; 
         
-        ctx.lineTo(r * Math.cos(angle), r * Math.sin(angle) * noiseY * 1.5 - (size*0.2));
+        ctx.lineTo(r * Math.cos(angle), r * Math.sin(angle) * noiseY * 1.6 - (size * 0.3));
       }
       ctx.closePath();
       ctx.fill();
 
-      // グロー効果（光彩）
-      ctx.shadowBlur = size * 0.5;
-      ctx.shadowColor = '#ff5722';
+      // 発光（Glow）エフェクト
+      ctx.shadowBlur = size * 0.6;
+      ctx.shadowColor = '#ff4500';
       ctx.fill();
 
       ctx.restore();
     }
 
-    // 3. ループ処理
+    // 3. メインループ
     async function renderLoop() {
-      // キャンバスをクリア
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       if (detector && video.readyState >= 2) {
         const hands = await detector.estimateHands(video);
 
         if (hands.length > 0) {
-          statusText.textContent = '手を認識中...';
-          
           let fireDetected = false;
 
-          // video と canvas の倍率補正（ループの外で計算）
           const scaleX = canvas.width / video.videoWidth;
           const scaleY = canvas.height / video.videoHeight;
 
           for (const hand of hands) {
             const keypoints = hand.keypoints;
-            const handedness = hand.handedness; // 'Left' or 'Right'
+            const handedness = hand.handedness;
 
-            // 手の甲の向き判定
-            const isBackUp = isBackOfHandFacingCamera(keypoints, handedness);
-
-            if (isBackUp) {
+            // 「手のひらが上を向いているか」チェック
+            if (isPalmFacingUp(keypoints, handedness)) {
               fireDetected = true;
               
-              // 炎を描画する基準位置（手の中心）
               const wrist = keypoints.find(k => k.name === 'wrist');
               const indexMcp = keypoints.find(k => k.name === 'index_finger_mcp');
               const pinkyMcp = keypoints.find(k => k.name === 'pinky_finger_mcp');
               
-              const baseCenterX = (wrist.x + indexMcp.x + pinkyMcp.x) / 3;
-              const baseCenterY = (wrist.y + indexMcp.y + pinkyMcp.y) / 3;
+              // 手のひらの中心座標
+              const palmCenterX = (wrist.x + indexMcp.x + pinkyMcp.x) / 3;
+              const palmCenterY = (wrist.y + indexMcp.y + pinkyMcp.y) / 3;
 
-              // 手の手首から指先への方向ベクトル（炎を浮かせる方向）
-              const indexTip = keypoints.find(k => k.name === 'index_finger_tip');
-              const dirX = indexTip.x - wrist.x;
-              const dirY = indexTip.y - wrist.y;
-              const dirLen = Math.hypot(dirX, dirY);
-              
-              // 炎のサイズ（手の大きさに比例）
+              // 手のサイズ計算
               const handSize = Math.hypot(wrist.x - indexMcp.x, wrist.y - indexMcp.y);
-              const fireSize = handSize * 0.8;
+              const fireSize = handSize * 0.85;
 
-              // 【修正点2】炎の位置を「少し上（指先方向）」に浮かせる
-              // 方向ベクトルを正規化して、手のサイズに比例した距離だけ移動させる
-              const offsetX = (dirX / dirLen) * (handSize * 0.5); 
-              const offsetY = (dirY / dirLen) * (handSize * 0.5);
+              // 手のひらの真上（画面のマイナスY方向）へ少し浮かせる
+              const floatOffsetY = handSize * 0.4;
 
-              const finalX = (baseCenterX + offsetX) * scaleX;
-              const finalY = (baseCenterY + offsetY) * scaleY;
+              const finalX = palmCenterX * scaleX;
+              const finalY = (palmCenterY - floatOffsetY) * scaleY;
 
-              // 炎を描画
               drawFire(finalX, finalY, fireSize);
             }
           }
 
           if (fireDetected) {
             fireIndicator.classList.add('active');
-            statusText.textContent = '手の甲に炎が浮かんでいます！';
+            statusText.textContent = '手のひらの上に炎が召喚されました！';
           } else {
             fireIndicator.classList.remove('active');
-            statusText.textContent = '手の甲をカメラに向けてください';
+            statusText.textContent = '手のひらを水平（上向き）に構えてください';
           }
 
         } else {
@@ -277,11 +262,9 @@
         }
       }
       
-      // 次のフレームへ
       requestAnimationFrame(renderLoop);
     }
 
-    // メイン実行処理
     async function main() {
       await setupCamera();
       if (video.srcObject) {
