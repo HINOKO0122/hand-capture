@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Air Drawing with MediaPipe</title>
+  
+  <!-- MediaPipe / TensorFlow.js 関連ライブラリの読み込み (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/hand-pose-detection"></script>
+
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #121212;
+      color: #ffffff;
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      overflow: hidden;
+    }
+
+    #container {
+      position: relative;
+      width: 640px;
+      height: 480px;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    }
+
+    /* カメラ映像とキャンバスを左右反転して重ねる（鏡と同じ挙動にする） */
+    video, canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 640px;
+      height: 480px;
+      transform: scaleX(-1);
+    }
+
+    #ui {
+      margin-top: 16px;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+
+    button {
+      padding: 8px 16px;
+      font-size: 14px;
+      border: none;
+      border-radius: 6px;
+      background-color: #e53935;
+      color: white;
+      cursor: pointer;
+      transition: background-color 0.2s;
+    }
+
+    button:hover {
+      background-color: #c62828;
+    }
+
+    #status {
+      font-size: 14px;
+      color: #aaa;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="container">
+    <!-- カメラ映像表示用 -->
+    <video id="webcam" autoplay playsinline></video>
+    <!-- お絵描き用キャンバス -->
+    <canvas id="drawCanvas" width="640" height="480"></canvas>
+  </div>
+
+  <div id="ui">
+    <button id="clearBtn">画面をクリア</button>
+    <span id="status">AIモデルを読み込んでいます...</span>
+  </div>
+
+  <script>
+    const video = document.getElementById('webcam');
+    const canvas = document.getElementById('drawCanvas');
+    const ctx = canvas.getContext('2d');
+    const clearBtn = document.getElementById('clearBtn');
+    const statusText = document.getElementById('status');
+
+    let detector = null;
+    let isDrawing = false;
+    let lastPoint = null;
+
+    // 描画線のスタイリング設定
+    ctx.strokeStyle = '#00ffcc';
+    ctx.lineWidth = 6;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    // 1. カメラの初期化
+    async function setupCamera() {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480 },
+        audio: false
+      });
+      video.srcObject = stream;
+      return new Promise((resolve) => {
+        video.onloadedmetadata = () => resolve(video);
+      });
+    }
+
+    // 2. Hand-Pose Detection モデルの初期化
+    async function setupDetector() {
+      const model = handPoseDetection.SupportedModels.MediaPipeHands;
+      const detectorConfig = {
+        runtime: 'mediapipe',
+        solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/hands',
+        modelType: 'full'
+      };
+      detector = await handPoseDetection.createDetector(model, detectorConfig);
+      statusText.textContent = '準備完了！人差し指を立てて描いてみよう（親指を近づけると描画一時停止）';
+    }
+
+    // 3. リアルタイム検知ルーチン
+    async function renderLoop() {
+      if (detector && video.readyState >= 2) {
+        const hands = await detector.estimateHands(video);
+
+        if (hands.length > 0) {
+          const keypoints = hands[0].keypoints;
+          
+          // 人差し指の先端 (8番) と 親指の先端 (4番) の座標を取得
+          const indexTip = keypoints.find(k => k.name === 'index_finger_tip');
+          const thumbTip = keypoints.find(k => k.name === 'thumb_tip');
+
+          if (indexTip && thumbTip) {
+            // 指同士の距離を計算（二点間距離）
+            const distance = Math.hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y);
+
+            // 親指と人差し指が離れているときだけ描画 (40px以上離れているか)
+            if (distance > 40) {
+              if (!isDrawing) {
+                isDrawing = true;
+                lastPoint = { x: indexTip.x, y: indexTip.y };
+              } else {
+                ctx.beginPath();
+                ctx.moveTo(lastPoint.x, lastPoint.y);
+                ctx.lineTo(indexTip.x, indexTip.y);
+                ctx.stroke();
+                lastPoint = { x: indexTip.x, y: indexTip.y };
+              }
+            } else {
+              // 指をくっつけたらペンを離す
+              isDrawing = false;
+              lastPoint = null;
+            }
+          }
+        } else {
+          isDrawing = false;
+          lastPoint = null;
+        }
+      }
+      requestAnimationFrame(renderLoop);
+    }
+
+    // 4. クリアボタンのイベント
+    clearBtn.addEventListener('click', () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    });
+
+    // メイン実行処理
+    async function main() {
+      try {
+        await setupCamera();
+        await setupDetector();
+        renderLoop();
+      } catch (err) {
+        console.error(err);
+        statusText.textContent = 'エラー: カメラアクセスを許可してください';
+      }
+    }
+
+    main();
+  </script>
+</body>
+</html>
