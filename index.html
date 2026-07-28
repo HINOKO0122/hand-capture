@@ -3,25 +3,22 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Air Drawing Fullscreen</title>
+  <title>Palm Fire AR - Local AI</title>
   
-  <!-- MediaPipe / TensorFlow.js 関連ライブラリ -->
+  <!-- MediaPipe / TensorFlow.js 関連ライブラリ (CDN) -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/hand-pose-detection"></script>
 
   <style>
-    * {
-      box-sizing: border-box;
-    }
     body, html {
       margin: 0;
       padding: 0;
       width: 100vw;
       height: 100vh;
       overflow: hidden;
-      background-color: #121212;
+      background-color: #000;
       font-family: sans-serif;
     }
 
@@ -31,7 +28,7 @@
       height: 100vh;
     }
 
-    /* 画面全体に広げて左右反転 */
+    /* カメラ映像とARキャンバスを全画面に広げて左右反転 */
     video, canvas {
       position: absolute;
       top: 0;
@@ -42,8 +39,8 @@
       transform: scaleX(-1);
     }
 
-    /* キャンバスは背景透過 */
-    #drawCanvas {
+    /* キャンバスは透過 */
+    #arCanvas {
       pointer-events: none;
     }
 
@@ -53,102 +50,85 @@
       top: 20px;
       left: 20px;
       z-index: 10;
-      display: flex;
-      align-items: center;
-      gap: 16px;
-      background: rgba(0, 0, 0, 0.65);
+      background: rgba(0, 0, 0, 0.7);
       padding: 12px 20px;
       border-radius: 12px;
       backdrop-filter: blur(8px);
       color: white;
-    }
-
-    button {
-      padding: 10px 18px;
-      font-size: 14px;
-      font-weight: bold;
-      border: none;
-      border-radius: 8px;
-      background-color: #ff3b30;
-      color: white;
-      cursor: pointer;
-      transition: background-color 0.2s;
-    }
-
-    button:hover {
-      background-color: #d72c21;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
     }
 
     #status {
       font-size: 14px;
     }
 
-    /* ペンが着地している（書ける）状態インジケーター */
-    #depth-indicator {
+    /* 炎がアクティブな時のインジケーター */
+    #fire-indicator {
       display: inline-block;
       width: 12px;
       height: 12px;
       border-radius: 50%;
-      background-color: #666;
-      margin-left: 8px;
+      background-color: #444;
+      transition: background-color 0.3s, box-shadow 0.3s;
     }
-    #depth-indicator.active {
-      background-color: #00ffcc;
-      box-shadow: 0 0 10px #00ffcc;
+    #fire-indicator.active {
+      background-color: #ff5722;
+      box-shadow: 0 0 15px #ff5722;
     }
   </style>
 </head>
 <body>
 
   <div id="container">
+    <!-- カメラ映像 -->
     <video id="webcam" autoplay playsinline></video>
-    <canvas id="drawCanvas"></canvas>
+    <!-- 炎を描画するARキャンバス -->
+    <canvas id="arCanvas"></canvas>
   </div>
 
   <div id="ui">
-    <button id="clearBtn">画面をクリア</button>
-    <div style="display: flex; align-items: center;">
-      <span id="status">AIモデルを読み込んでいます...</span>
-      <span id="depth-indicator"></span>
-    </div>
+    <span id="fire-indicator"></span>
+    <span id="status">AIモデルを読み込んでいます...</span>
   </div>
 
   <script>
     const video = document.getElementById('webcam');
-    const canvas = document.getElementById('drawCanvas');
+    const canvas = document.getElementById('arCanvas');
     const ctx = canvas.getContext('2d');
-    const clearBtn = document.getElementById('clearBtn');
     const statusText = document.getElementById('status');
-    const depthIndicator = document.getElementById('depth-indicator');
+    const fireIndicator = document.getElementById('fire-indicator');
 
     let detector = null;
-    let isDrawing = false;
-    let lastPoint = null;
+
+    // 炎の画像をCDNから読み込み（透過PNGまたは透過GIFが良い）
+    // ここでは、プログラムで描画する簡易的な炎エフェクトを使用します
 
     // 画面サイズのリサイズ処理
     function resizeCanvas() {
       canvas.width = window.innerWidth;
       canvas.height = window.innerHeight;
-      
-      // リサイズ時に線のスタイルを設定し直す
-      ctx.strokeStyle = '#00ffcc';
-      ctx.lineWidth = 8;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
     }
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
 
     // 1. カメラ設定
     async function setupCamera() {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
-        audio: false
-      });
-      video.srcObject = stream;
-      return new Promise((resolve) => {
-        video.onloadedmetadata = () => resolve(video);
-      });
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
+          audio: false
+        });
+        video.srcObject = stream;
+        return new Promise((resolve) => {
+          video.onloadedmetadata = () => resolve(video);
+        });
+      } catch (err) {
+        statusText.textContent = 'エラー: カメラアクセスを許可してください';
+        console.error(err);
+      }
     }
 
     // 2. Hand Detector 初期化
@@ -157,108 +137,155 @@
       const detectorConfig = {
         runtime: 'mediapipe',
         solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/hands',
-        modelType: 'full'
+        modelType: 'full' // 精度重視
       };
       detector = await handPoseDetection.createDetector(model, detectorConfig);
-      statusText.textContent = '準備完了：人差し指だけを立て、手前に押し出すと描画できます';
+      statusText.textContent = '準備完了：手のひらをカメラに向けてください';
     }
 
-    // 指が1本（人差し指）だけ伸びているか判定
-    function isOnlyIndexExtended(keypoints) {
+    // 手のひらが上（カメラ側）を向いているか判定する関数
+    function isPalmFacingCamera(keypoints, handedness) {
+      // 簡略化した判定ロジック：
+      // 親指(4)、人差し指(8)、小指(20)の相対位置関係と、
+      // 左右の手情報(handedness)を組み合わせて、手のひらの向きを推定します。
+
       const getPt = (name) => keypoints.find(k => k.name === name);
-
       const wrist = getPt('wrist');
+      const thumbTip = getPt('thumb_tip');
       const indexTip = getPt('index_finger_tip');
-      const indexMcp = getPt('index_finger_mcp');
-      const middleTip = getPt('middle_finger_tip');
-      const middleMcp = getPt('middle_finger_mcp');
-      const ringTip = getPt('ring_finger_tip');
-      const ringMcp = getPt('ring_finger_mcp');
       const pinkyTip = getPt('pinky_finger_tip');
-      const pinkyMcp = getPt('pinky_finger_mcp');
 
-      // 手首からの距離で、指が伸ばされているかを判定
-      const dist = (p1, p2) => Math.hypot(p1.x - p2.x, p1.y - p2.y);
+      // Z軸のデータが不安定な場合があるため、X軸の相対位置（左右の手）で簡易判定
+      // 鏡像（左右反転）であることを考慮
+      const isRightHand = handedness === 'Right';
+      
+      // 手首から指先へのベクトル
+      const wristToIndex = { x: indexTip.x - wrist.x, y: indexTip.y - wrist.y };
+      // 手首から親指へのベクトル
+      const wristToThumb = { x: thumbTip.x - wrist.x, y: thumbTip.y - wrist.y };
 
-      const indexExtended = dist(indexTip, wrist) > dist(indexMcp, wrist) * 1.2;
-      const middleFolded = dist(middleTip, wrist) < dist(middleMcp, wrist) * 1.1;
-      const ringFolded = dist(ringTip, wrist) < dist(ringMcp, wrist) * 1.1;
-      const pinkyFolded = dist(pinkyTip, wrist) < dist(pinkyMcp, wrist) * 1.1;
+      // 外積（Cross Product）を使って、2つのベクトルの向きから手のひらの前後を判定
+      // Z成分の正負で判定（MediaPipeの座標系依存）
+      const crossProductZ = wristToIndex.x * wristToThumb.y - wristToIndex.y * wristToThumb.x;
 
-      return indexExtended && middleFolded && ringFolded && pinkyFolded;
+      // 鏡像であることを考慮した判定
+      // この閾値は環境により調整が必要な場合があります
+      if (isRightHand) {
+        return crossProductZ > 100; // 右手のひらが前
+      } else {
+        return crossProductZ < -100; // 左手のひらが前
+      }
+    }
+
+    // 炎のアニメーションを描画する関数
+    let flameFrame = 0;
+    function drawFire(x, y, size) {
+      flameFrame++;
+      
+      ctx.save();
+      ctx.translate(x, y); // 手の中心へ移動
+
+      // 炎のグラデーション
+      const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, size);
+      gradient.addColorStop(0, 'rgba(255, 255, 200, 1)'); // 芯（白黄色）
+      gradient.addColorStop(0.3, 'rgba(255, 200, 50, 0.9)'); // 炎（オレンジ）
+      gradient.addColorStop(0.7, 'rgba(255, 80, 0, 0.6)'); // 炎の外側（赤）
+      gradient.addColorStop(1, 'rgba(255, 0, 0, 0)'); // 透過
+
+      ctx.fillStyle = gradient;
+      
+      // 揺らぐ炎の形状を描画（簡易版）
+      ctx.beginPath();
+      for (let i = 0; i < 360; i += 10) {
+        const angle = i * Math.PI / 180;
+        // 乱数とフレーム数で揺らぎを表現
+        const wobble = Math.sin(flameFrame * 0.2 + i * 0.1) * (size * 0.1) + Math.random() * (size * 0.05);
+        const r = size + wobble;
+        // 炎の上部を尖らせる
+        const noiseY = Math.sin(angle) > 0 ? 0.5 : 1.0; 
+        
+        ctx.lineTo(r * Math.cos(angle), r * Math.sin(angle) * noiseY * 1.5 - (size*0.2));
+      }
+      ctx.closePath();
+      ctx.fill();
+
+      // グロー効果（光彩）
+      ctx.shadowBlur = size * 0.5;
+      ctx.shadowColor = '#ff5722';
+      ctx.fill();
+
+      ctx.restore();
     }
 
     // 3. ループ処理
     async function renderLoop() {
+      // キャンバスをクリア
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
       if (detector && video.readyState >= 2) {
         const hands = await detector.estimateHands(video);
 
         if (hands.length > 0) {
-          const keypoints = hands[0].keypoints;
-          const indexTip = keypoints.find(k => k.name === 'index_finger_tip');
+          statusText.textContent = '手を認識中...';
+          
+          let fireDetected = false;
 
-          // 【条件1】人差し指だけが伸びているか
-          const validGesture = isOnlyIndexExtended(keypoints);
+          for (const hand of hands) {
+            const keypoints = hand.keypoints;
+            const handedness = hand.handedness; // 'Left' or 'Right'
 
-          // 【条件2】Z軸（またはカメラ画像上の手の大きさ）による深さ判定
-          // 手が前に押し出されている（カメラに近づいている＝描画）かどうか
-          // ※ MediaPipeのZ座標、または手の関節間距離で画面への近さを判定できます
-          const wrist = keypoints.find(k => k.name === 'wrist');
-          const indexMcp = keypoints.find(k => k.name === 'index_finger_mcp');
-          const handSize = Math.hypot(wrist.x - indexMcp.x, wrist.y - indexMcp.y);
+            // 手のひらの向き判定
+            const isPalmUp = isPalmFacingCamera(keypoints, handedness);
 
-          // 画面に手を近づけると handSize が大きくなる
-          // カメラからの距離閾値（環境に合わせて手を前へ押し出すと描画モードになる）
-          const isPenPressed = handSize > 80; 
+            if (isPalmUp) {
+              fireDetected = true;
+              
+              // 炎を描画する中心位置（手のひらの中央）を計算
+              // 複数の関節の平均位置にする
+              const wrist = keypoints.find(k => k.name === 'wrist');
+              const indexMcp = keypoints.find(k => k.name === 'index_finger_mcp');
+              const pinkyMcp = keypoints.find(k => k.name === 'pinky_finger_mcp');
+              
+              const centerX = (wrist.x + indexMcp.x + pinkyMcp.x) / 3;
+              const centerY = (wrist.y + indexMcp.y + pinkyMcp.y) / 3;
 
-          if (validGesture && isPenPressed) {
-            depthIndicator.classList.add('active');
+              // video と canvas の倍率補正
+              const scaleX = canvas.width / video.videoWidth;
+              const scaleY = canvas.height / video.videoHeight;
+              
+              // 炎のサイズ（手の大きさに比例させる）
+              const handSize = Math.hypot(wrist.x - indexMcp.x, wrist.y - indexMcp.y);
+              const fireSize = handSize * 0.8;
 
-            // video の表示サイズと canvas の実際の描画座標の倍率補正
-            const scaleX = canvas.width / video.videoWidth;
-            const scaleY = canvas.height / video.videoHeight;
-            
-            const currentPoint = {
-              x: indexTip.x * scaleX,
-              y: indexTip.y * scaleY
-            };
-
-            if (!isDrawing) {
-              isDrawing = true;
-              lastPoint = currentPoint;
-            } else {
-              ctx.beginPath();
-              ctx.moveTo(lastPoint.x, lastPoint.y);
-              ctx.lineTo(currentPoint.x, currentPoint.y);
-              ctx.stroke();
-              lastPoint = currentPoint;
+              // 炎を描画
+              drawFire(centerX * scaleX, centerY * scaleY, fireSize);
             }
-          } else {
-            depthIndicator.classList.remove('active');
-            isDrawing = false;
-            lastPoint = null;
           }
+
+          if (fireDetected) {
+            fireIndicator.classList.add('active');
+            statusText.textContent = '手のひらに炎が浮かんでいます！';
+          } else {
+            fireIndicator.classList.remove('active');
+            statusText.textContent = '手のひらをカメラに向けてください';
+          }
+
         } else {
-          depthIndicator.classList.remove('active');
-          isDrawing = false;
-          lastPoint = null;
+          statusText.textContent = '手を認識していません';
+          fireIndicator.classList.remove('active');
         }
       }
+      
+      // 次のフレームへ
       requestAnimationFrame(renderLoop);
     }
 
-    clearBtn.addEventListener('click', () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-    });
-
+    // メイン実行処理
     async function main() {
-      try {
-        await setupCamera();
+      await setupCamera();
+      if (video.srcObject) {
         await setupDetector();
         renderLoop();
-      } catch (err) {
-        console.error(err);
-        statusText.textContent = 'エラー: カメラアクセスを許可してください';
       }
     }
 
